@@ -20,7 +20,7 @@ def training():
         model.train()
 
         while i <= 100:  # iteration of unit
-            print(" ### i = ", i)
+            print("\n ### i = ", i)
 
             # fetch the data of unit i
             x = group.get_group(i).to_numpy()
@@ -28,7 +28,7 @@ def training():
             optim.zero_grad()
 
             for t in range(x.shape[0] - 1):
-                print(" ### t = ", t)
+                # print(t, end = '_')
                 if t == 0:  # skip the first and last for convolution without padding
                     continue
                 else:
@@ -36,8 +36,6 @@ def training():
 
                 y = x[t, -1:]  # fetch the corresponding target rul as label
 
-                # X_train_tensors = Variable(torch.Tensor(X))
-                # y_train_tensors = Variable(torch.Tensor(y))
                 X_train_tensors = Variable(torch.Tensor(X)).to(device)  # <- 추가
                 y_train_tensors = Variable(torch.Tensor(y)).to(device)  # <- 추가
 
@@ -67,7 +65,7 @@ def training():
             epoch_loss += total_loss / x.shape[0]
 
         # evaluate model
-        print(" Now we are in the evaluation step")
+        print(" --- Now we are in the evaluation step --- ")
         model.eval()
 
         with torch.no_grad():
@@ -83,20 +81,24 @@ if __name__ == "__main__":
     parser.add_argument('--dataset', type=str, default='FD001', help='which dataset to run')
     opt = parser.parse_args()
     
-    num_epochs = 100 # Number of training epochs
-    d_model = 128  # dimension in encoder
-    heads = 4  # number of heads in multi-head attention
-    N = 2  # number of encoder layers
-    m = 14  # number of features
+    # Default 상태
+    # num_epochs = 100 # Number of training epochs
+    # d_model = 128  # dimension in encoder
+    # heads = 4  # number of heads in multi-head attention
+    # N = 2  # number of encoder layers
+    # m = 14  # number of features
 
-
+    num_epochs = 200 # 더 긴 학습 시간
+    d_model = 256  # 증가 
+    heads = 8 # 증가
+    N = 2  
+    m = 14  
+    dropout = 0.1
+    learning_rate = 0.0005 # 더 안정적인 학습을 위해 learning rate를 줄임
     
     if opt.dataset == 'FD001':
         # loading training and testing sets
         group, y_test, group_test = loading_FD001()
-        
-        #setting the drooput rate
-        dropout = 0.1
         
         # define and load model
         model = Transformer(m, d_model, N, heads, dropout).to(device)  # <- 추가
@@ -107,7 +109,7 @@ if __name__ == "__main__":
                 nn.init.xavier_uniform_(p)
                 
         # initialize Adam optimizer
-        optim = torch.optim.Adam(model.parameters(), lr=0.001)
+        optim = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
         # mean-squared error for regression
         criterion = torch.nn.MSELoss()
