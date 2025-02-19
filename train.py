@@ -9,6 +9,7 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 import argparse
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+print(device)
 
 def training():
     for epoch in range(num_epochs):  # iteration of epoch
