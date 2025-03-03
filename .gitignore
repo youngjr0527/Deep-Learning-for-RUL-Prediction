@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+
+# Generated images
+Transformer*.png
+
+# IDE
+.idea/
+
+
