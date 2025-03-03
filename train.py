@@ -88,13 +88,13 @@ if __name__ == "__main__":
     # N = 2  # number of encoder layers
     # m = 14  # number of features
 
-    num_epochs = 200 # 더 긴 학습 시간
-    d_model = 256  # 증가 
-    heads = 8 # 증가
-    N = 2  
+    num_epochs = 100
+    d_model = 512  
+    heads = 8 
+    N = 4  
     m = 14  
     dropout = 0.1
-    learning_rate = 0.0005 # 더 안정적인 학습을 위해 learning rate를 줄임
+    learning_rate = 0.001 
     
     if opt.dataset == 'FD001':
         # loading training and testing sets
