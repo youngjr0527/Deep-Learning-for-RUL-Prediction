@@ -107,7 +107,7 @@ python main.py --model transformer --d_model 64 --heads 2 --n_layers 1 --epochs 
 python main.py --model tcn --lr 0.0005 --dropout 0.2
 
 # Early stopping 매개변수 조정
-python main.py --model transformer --patience 5 
+python main.py --model transformer --d_model 256 --heads 8 --n_layers 4 --seq_len 30 --lr 0.0005 --patience 15 --lr_scheduler
 ```
 
 ## 결과 시각화
