@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import datetime
 import argparse  
+from tqdm import tqdm  # tqdm 추가
 
 def set_seed(seed: int):
     """
@@ -30,8 +31,11 @@ def evaluate_model(model, val_loader, criterion, device='cpu', model_type='tcn',
     model.eval()
     total_loss = 0.0
 
+    # tqdm으로 진행 상황 표시
+    val_loop = tqdm(val_loader, desc=f"Validation", leave=False)
+
     with torch.no_grad():
-        for inputs, labels in val_loader:
+        for inputs, labels in val_loop:
             # Move inputs and labels to the selected device
             inputs, labels = inputs.to(device), labels.to(device)
 
@@ -54,8 +58,35 @@ def evaluate_model(model, val_loader, criterion, device='cpu', model_type='tcn',
                     # 각 샘플 처리
                     x = inputs[i]  # (seq_len, features)
                     
-                    # 모델 적용 - 시간 정보로 epoch 전달
-                    output = model(x.unsqueeze(0), epoch)  # 배치 차원 추가 (1, seq_len, features)
+                    # 원본 코드와 일치하도록 3개의 연속된 시간 단계 사용
+                    # 시퀀스 길이가 충분한 경우에만 처리
+                    if seq_len >= 3:
+                        # 각 시간 단계에 대해 처리 (원본 코드는 각 시간 단계마다 처리)
+                        # 여기서는 평가를 위해 마지막 3개 시간 단계만 사용
+                        last_steps = x[-3:, :]  # (3, features)
+                        
+                        # 4차원으로 변환 (1, 1, 3, features)
+                        x_reshaped = last_steps.unsqueeze(0).unsqueeze(0)
+                        
+                        # 시간 단계 t는 시퀀스 내 위치 (여기서는 마지막 위치)
+                        t = seq_len - 2  # 중간 위치 (t-1, t, t+1에서 t)
+                        
+                        # 모델 적용
+                        output = model(x_reshaped, t)
+                    else:
+                        # 시퀀스 길이가 3보다 작은 경우 패딩 처리
+                        padded_x = torch.zeros(3, feature_size, device=device)
+                        padded_x[-seq_len:, :] = x
+                        
+                        # 4차원으로 변환
+                        x_reshaped = padded_x.unsqueeze(0).unsqueeze(0)  # (1, 1, 3, features)
+                        
+                        # 시간 단계 t는 시퀀스 내 위치
+                        t = max(1, seq_len - 1)  # 최소 1 (중간 위치)
+                        
+                        # 모델 적용
+                        output = model(x_reshaped, t)
+                    
                     outputs_list.append(output)
                 
                 # 모든 샘플의 결과를 하나의 텐서로 결합
@@ -64,6 +95,9 @@ def evaluate_model(model, val_loader, criterion, device='cpu', model_type='tcn',
             # Compute loss
             loss = criterion(outputs, labels)
             total_loss += loss.item()
+            
+            # tqdm 진행 상황 업데이트
+            val_loop.set_postfix(loss=loss.item())
 
     avg_loss = total_loss / len(val_loader)
     return avg_loss
@@ -77,11 +111,19 @@ def train_and_save_best_model(model, train_loader, val_loader, criterion, optimi
     counter = 0
     early_stop = False
     
-    for epoch in range(epochs):
+    # tqdm으로 에포크 진행 상황 표시
+    epoch_loop = tqdm(range(epochs), desc="Training")
+    
+    for epoch in epoch_loop:
         # Training phase
         model.train()
         total_loss = 0.0
-        for inputs, labels in train_loader:
+        
+        # 원본 코드와 유사하게 각 배치를 독립적으로 처리
+        # tqdm으로 배치 진행 상황 표시
+        batch_loop = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}/{epochs}", leave=False)
+        
+        for batch_idx, (inputs, labels) in batch_loop:
             # Move inputs and labels to the selected device
             inputs, labels = inputs.to(device), labels.to(device)
 
@@ -91,53 +133,127 @@ def train_and_save_best_model(model, train_loader, val_loader, criterion, optimi
                 inputs = inputs.transpose(1, 2)  # (batch_size, 5, 30)
                 outputs = model(inputs)
                 outputs = outputs[:, :, -1]
+                
+                # 손실 계산 및 역전파
+                loss = criterion(outputs, labels)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                
+                total_loss += loss.item()
+                
+                # tqdm 진행 상황 업데이트
+                batch_loop.set_postfix(loss=loss.item())
+                
             elif model_type == 'transformer':
                 # Transformer용 처리
                 batch_size = inputs.size(0)
-                # 배치 내 모든 샘플을 처리하는 리스트
-                outputs_list = []
+                seq_len = inputs.size(1)  # 시퀀스 길이
+                feature_size = inputs.size(2)  # 특성 수
+                
+                # 원본 코드와 유사하게 각 샘플을 독립적으로 처리
+                batch_loss = 0.0
                 
                 for i in range(batch_size):
-                    # 각 샘플을 평탄화하고 배치 차원 추가
+                    # 각 샘플 처리
                     x = inputs[i]  # (seq_len, features)
+                    y = labels[i]  # 단일 RUL 값
                     
-                    # 디버깅 정보 (필요시 주석 해제)
-                    # print(f"샘플 {i} 입력 형태: {x.shape}")
-                    
-                    # 모델 적용 - 시간 정보를 인덱스로 활용
-                    output = model(x.unsqueeze(0), epoch)  # 배치 차원 추가 (1, seq_len, features)
-                    outputs_list.append(output)
+                    # 원본 코드와 일치하도록 각 시간 단계에 대해 처리
+                    # 여기서는 시퀀스 길이가 충분한 경우에만 처리
+                    if seq_len >= 3:
+                        # 각 시간 단계에 대해 처리 (원본 코드는 각 시간 단계마다 처리)
+                        # 여기서는 시간 효율성을 위해 마지막 3개 시간 단계만 사용
+                        sample_loss = 0.0
+                        
+                        # 마지막 3개 시간 단계에 대해 처리
+                        for t in range(max(0, seq_len - 3), seq_len):
+                            # 현재 시간 단계 t를 중심으로 3개의 연속된 시간 단계 선택
+                            t_start = max(0, t - 1)
+                            t_end = min(seq_len, t + 2)
+                            
+                            # 3개의 시간 단계가 되도록 패딩
+                            if t_end - t_start < 3:
+                                if t_start == 0:  # 시작 부분인 경우
+                                    t_end = min(seq_len, 3)
+                                else:  # 끝 부분인 경우
+                                    t_start = max(0, seq_len - 3)
+                            
+                            # 3개의 연속된 시간 단계 선택
+                            steps = x[t_start:t_end, :]
+                            
+                            # 필요한 경우 패딩
+                            if steps.size(0) < 3:
+                                padded_steps = torch.zeros(3, feature_size, device=device)
+                                padded_steps[-steps.size(0):, :] = steps
+                                steps = padded_steps
+                            
+                            # 4차원으로 변환 (1, 1, 3, features)
+                            x_reshaped = steps.unsqueeze(0).unsqueeze(0)
+                            
+                            # 모델 적용 - t는 시퀀스 내 위치
+                            output = model(x_reshaped, t)
+                            
+                            # 손실 계산 (각 시간 단계마다)
+                            step_loss = criterion(output, y.unsqueeze(0))
+                            sample_loss += step_loss.item()
+                            
+                            # 역전파 (원본 코드는 각 시간 단계마다 손실 누적)
+                            step_loss.backward()
+                        
+                        # 샘플의 평균 손실
+                        sample_loss /= min(3, seq_len)
+                        batch_loss += sample_loss
+                    else:
+                        # 시퀀스 길이가 3보다 작은 경우 패딩 처리
+                        padded_x = torch.zeros(3, feature_size, device=device)
+                        padded_x[-seq_len:, :] = x
+                        
+                        # 4차원으로 변환
+                        x_reshaped = padded_x.unsqueeze(0).unsqueeze(0)  # (1, 1, 3, features)
+                        
+                        # 시간 단계 t는 시퀀스 내 위치
+                        t = max(1, seq_len - 1)  # 최소 1 (중간 위치)
+                        
+                        # 모델 적용
+                        output = model(x_reshaped, t)
+                        
+                        # 손실 계산
+                        sample_loss = criterion(output, y.unsqueeze(0))
+                        batch_loss += sample_loss.item()
+                        
+                        # 역전파
+                        sample_loss.backward()
                 
-                # 모든 샘플의 결과를 하나의 텐서로 결합
-                outputs = torch.cat(outputs_list, dim=0)
-
-            # Compute loss
-            loss = criterion(outputs, labels)
-
-            # Backward pass and optimization
-            optimizer.zero_grad()
-            loss.backward()
-            
-            # Gradient clipping for Transformer
-            if model_type == 'transformer':
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                # 배치의 평균 손실
+                batch_loss /= batch_size
+                total_loss += batch_loss
                 
-            optimizer.step()
-
-            total_loss += loss.item()
+                # tqdm 진행 상황 업데이트
+                batch_loop.set_postfix(loss=batch_loss)
+                
+                # 원본 코드와 유사하게 배치 처리 후 옵티마이저 스텝
+                optimizer.step()
+                optimizer.zero_grad()
             
+        # 에포크의 평균 손실
+        avg_train_loss = total_loss / len(train_loader)
+        
         # 학습률 스케줄러 적용 (있는 경우)
         if scheduler is not None:
             scheduler.step()
             current_lr = scheduler.get_last_lr()[0]
-            print(f"Current learning rate: {current_lr:.8f}")
-
-        avg_train_loss = total_loss / len(train_loader)
-        print(f"Epoch [{epoch + 1}/{epochs}], Training Loss: {avg_train_loss:.4f}")
+            # tqdm 설명 업데이트
+            epoch_loop.set_description(f"Training (lr={current_lr:.6f})")
 
         # Validation phase
         val_loss = evaluate_model(model, val_loader, criterion, device, model_type, epoch)
-        print(f"Epoch [{epoch + 1}/{epochs}], Validation Loss: {val_loss:.4f}")
+        
+        # tqdm 진행 상황 업데이트
+        epoch_loop.set_postfix(train_loss=avg_train_loss, val_loss=val_loss)
+        
+        # 콘솔에 자세한 정보 출력
+        print(f"\nEpoch [{epoch + 1}/{epochs}], Training Loss: {avg_train_loss:.4f}, Validation Loss: {val_loss:.4f}")
 
         # Early stopping 체크
         if val_loss < best_val_loss - min_delta:
@@ -166,8 +282,11 @@ def predict_and_evaluate(model, x_test, y_test, device, model_type, now):
     model.eval()
     predictions = []
     
+    # tqdm으로 테스트 진행 상황 표시
+    test_loop = tqdm(range(len(x_test)), desc="Testing")
+    
     with torch.no_grad():
-        for i in range(len(x_test)):
+        for i in test_loop:
             # x_test[i] -> shape: (seq_len, num_features)
             if model_type == 'tcn':
                 x = torch.tensor(x_test[i], dtype=torch.float, device=device).unsqueeze(0)  # (1, seq_len, num_features)
@@ -178,11 +297,41 @@ def predict_and_evaluate(model, x_test, y_test, device, model_type, now):
                 predictions.append(output.item())
             elif model_type == 'transformer':
                 x = torch.tensor(x_test[i], dtype=torch.float, device=device)  # (seq_len, num_features)
-                # 배치 차원 추가
-                x = x.unsqueeze(0)  # (1, seq_len, num_features)
-                # 예측을 위해 t=0 사용
-                output = model(x, 0)
+                seq_len = x.size(0)
+                feature_size = x.size(1)
+                
+                # 원본 코드와 일치하도록 3개의 연속된 시간 단계 사용
+                if seq_len >= 3:
+                    # 마지막 3개 시간 단계 선택
+                    last_steps = x[-3:, :]  # (3, features)
+                    
+                    # 4차원으로 변환 (1, 1, 3, features)
+                    x_reshaped = last_steps.unsqueeze(0).unsqueeze(0)
+                    
+                    # 시간 단계 t는 시퀀스 내 위치 (여기서는 마지막 위치)
+                    t = seq_len - 2  # 중간 위치 (t-1, t, t+1에서 t)
+                    
+                    # 모델 적용
+                    output = model(x_reshaped, t)
+                else:
+                    # 시퀀스 길이가 3보다 작은 경우 패딩 처리
+                    padded_x = torch.zeros(3, feature_size, device=device)
+                    padded_x[-seq_len:, :] = x
+                    
+                    # 4차원으로 변환
+                    x_reshaped = padded_x.unsqueeze(0).unsqueeze(0)  # (1, 1, 3, features)
+                    
+                    # 시간 단계 t는 시퀀스 내 위치
+                    t = max(1, seq_len - 1)  # 최소 1 (중간 위치)
+                    
+                    # 모델 적용
+                    output = model(x_reshaped, t)
+                
                 predictions.append(output.item())
+            
+            # tqdm 진행 상황 업데이트
+            if i % 10 == 0:  # 10개마다 업데이트
+                test_loop.set_postfix(sample=f"{i}/{len(x_test)}")
     
     # pandas.Series인 y_test와 예측값 리스트 predictions를 합쳐 DataFrame 생성
     df_pred = pd.DataFrame({
@@ -238,10 +387,10 @@ def main():
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate (default: 0.001)')
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate (default: 0.1)')
     parser.add_argument('--seed', type=int, default=42, help='Random seed (default: 42)')
-    # Transformer 모델 관련 추가 매개변수 
-    parser.add_argument('--d_model', type=int, default=256, help='Transformer 임베딩 차원 (default: 256)')
-    parser.add_argument('--heads', type=int, default=8, help='Transformer 어텐션 헤드 수 (default: 8)')
-    parser.add_argument('--n_layers', type=int, default=4, help='Transformer 인코더 레이어 수 (default: 4)')
+    # Transformer 모델 관련 추가 매개변수 - 원본 코드와 일치하도록 기본값 수정
+    parser.add_argument('--d_model', type=int, default=128, help='Transformer 임베딩 차원 (default: 128)')
+    parser.add_argument('--heads', type=int, default=4, help='Transformer 어텐션 헤드 수 (default: 4)')
+    parser.add_argument('--n_layers', type=int, default=2, help='Transformer 인코더 레이어 수 (default: 2)')
     parser.add_argument('--seq_len', type=int, default=30, help='시퀀스 길이 (default: 30)')
     # Early stopping 관련 매개변수
     parser.add_argument('--patience', type=int, default=15, help='Early stopping patience (default: 15)')
@@ -277,7 +426,7 @@ def main():
     # Create data loaders
     batch_size = args.batch_size
     n_epochs = args.epochs
-    n_workers = 4  # 병렬 처리 워커 수 증가
+    n_workers = 8  # 병렬 처리 워커 수 증가
     tf = transforms.Compose([data.NpToTensor()])
     train_loader = data.get_dataloader(x_train, y_train, tf, None, True, batch_size, n_workers)
     val_loader = data.get_dataloader(x_val, y_val, tf, None, True, batch_size, n_workers)
@@ -303,13 +452,14 @@ def main():
         model_type = 'tcn'
         
     elif args.model == 'transformer':
-        # Transformer 모델 정의 - 매개변수를 커맨드 라인 인자로부터 가져옴
-        d_model = args.d_model  # dimension in encoder (256 권장)
-        heads = args.heads      # number of heads in multi-head attention (8 권장)
-        N = args.n_layers       # number of encoder layers (4 권장)
+        # Transformer 모델 정의 - 원본 코드와 일치하도록 수정
+        d_model = args.d_model  # dimension in encoder (128)
+        heads = args.heads      # number of heads in multi-head attention (4)
+        N = args.n_layers       # number of encoder layers (2)
         
         print(f"Transformer 설정: d_model={d_model}, heads={heads}, layers={N}, features={m}, seq_len={sequence_length}")
         
+        # 원본 코드와 일치하는 Transformer 모델 초기화
         model = Transformer(
             m=m,
             d_model=d_model,
@@ -318,7 +468,7 @@ def main():
             dropout=dropout
         ).to(device)
         
-        # Initialize weights (Transformer도 Xavier 초기화 적용)
+        # Initialize weights (원본 코드와 동일하게 Xavier 초기화 적용)
         for p in model.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
@@ -328,15 +478,12 @@ def main():
     # Loss function and optimizer
     criterion = torch.nn.MSELoss()
     
-    # Transformer에는 낮은 학습률과 가중치 감쇠 적용
-    if args.model == 'transformer':
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
-    else:
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # 원본 코드와 일치하도록 옵티마이저 설정
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     
-    # 학습률 스케줄러 설정 (Transformer에만 적용)
+    # 학습률 스케줄러 설정 (선택적)
     scheduler = None
-    if args.model == 'transformer' and args.lr_scheduler:
+    if args.lr_scheduler:
         # 학습 중 학습률 감쇠를 위한 스케줄러
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer, T_0=10, T_mult=2, eta_min=1e-6

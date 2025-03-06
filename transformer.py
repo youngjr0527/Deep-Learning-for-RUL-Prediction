@@ -95,45 +95,81 @@ class Gating(nn.Module):
         # 입력 텐서의 차원 확인 및 적절한 처리
         input_dim = len(x.shape)
         
-        # 3차원 텐서 처리 (batch_size, seq_len, features) - main.py에서 수정된 입력 형태
-        if input_dim == 3:  # [batch_size, seq_len, features]
+        # 원본 코드와 일치하도록 4차원 입력 처리 (batch, channel, seq_len, features)
+        if input_dim == 4:  # [batch_size, channels, seq_len, features] 형태
+            # 원본 코드 사용
+            x_i = x[:, :, 1:2, :]  # 중간 행만 사용 (t 시점)
+            h_i = self.cnn_layers(x)  # 3개 행에 대해 컨볼루션 적용 (t-1, t, t+1)
+            
+            # 게이팅 메커니즘 적용
+            r_i = torch.sigmoid(torch.matmul(h_i, self.W_r) + torch.matmul(x_i, self.V_r) + self.b_r)
+            u_i = torch.sigmoid(torch.matmul(h_i, self.W_u) + torch.matmul(x_i, self.V_u) + self.b_u)
+
+            # the output of the gating mechanism
+            hh_i = torch.mul(h_i, u_i) + torch.mul(x_i, r_i)
+            
+            output = torch.matmul(hh_i, self.W_e) + self.b_e
+            
+            # 출력 형태 재조정
+            output = output.view(-1, self.d_model)
+            
+            return output
+            
+        # 3차원 입력 처리 (batch, seq_len, features) - 이 경우 3개의 연속된 시간 단계로 변환
+        elif input_dim == 3:
             batch_size = x.size(0)
             seq_len = x.size(1)
             feature_size = x.size(2)
             
-            # RUL 예측은 시퀀스의 마지막 값에 관심이 있으므로
-            # 시퀀스의 마지막 스텝만 사용하여 처리 (또는 필요에 따라 평균/합계 사용 가능)
-            x_last = x[:, -1, :]  # 시퀀스의 마지막 타임스텝 [batch_size, features]
-            
-            # 특성 수 확인
-            if feature_size < self.m:
-                # 특성 수가 부족한 경우 패딩
-                padded_x = torch.zeros(batch_size, self.m, device=x.device)
-                padded_x[:, :feature_size] = x_last
-                x_last = padded_x
-            elif feature_size > self.m:
-                # 특성 수가 너무 많은 경우 자르기
-                x_last = x_last[:, :self.m]
-            
-            # 선형 투영으로 차원 변환
-            projected = self.input_projection(x_last)  # [batch_size, d_model]
-            
-            # 게이팅 메커니즘
-            gate_val = self.sigmoid(self.gate(projected))
-            gated_output = projected * gate_val
-            
-            # 피드포워드 네트워크
-            ff_output = F.relu(self.ff1(gated_output))
-            ff_output = self.dropout(ff_output)
-            ff_output = self.ff2(ff_output)
-            
-            # 잔차 연결 + 정규화
-            output = self.layer_norm(gated_output + ff_output)
-            
-            return output
-        
-        elif input_dim == 2:  # [batch_size, features] 형태
-            # 개선된 처리 방식 - 선형 변환 + 게이팅 메커니즘
+            # 시퀀스 길이가 충분한 경우에만 처리
+            if seq_len >= 3:
+                # 마지막 3개의 시간 단계 선택 (또는 필요에 따라 다른 위치 선택)
+                last_steps = x[:, -3:, :]  # (batch_size, 3, features)
+                
+                # 4차원으로 변환 (batch_size, 1, 3, features)
+                x_reshaped = last_steps.unsqueeze(1)
+                
+                # 4차원 처리 로직 재사용
+                x_i = x_reshaped[:, :, 1:2, :]  # 중간 행만 사용
+                h_i = self.cnn_layers(x_reshaped)  # 3개 행에 대해 컨볼루션 적용
+                
+                # 게이팅 메커니즘 적용
+                r_i = torch.sigmoid(torch.matmul(h_i, self.W_r) + torch.matmul(x_i, self.V_r) + self.b_r)
+                u_i = torch.sigmoid(torch.matmul(h_i, self.W_u) + torch.matmul(x_i, self.V_u) + self.b_u)
+                
+                # the output of the gating mechanism
+                hh_i = torch.mul(h_i, u_i) + torch.mul(x_i, r_i)
+                
+                output = torch.matmul(hh_i, self.W_e) + self.b_e
+                
+                # 출력 형태 재조정
+                output = output.view(batch_size, self.d_model)
+                
+                return output
+            else:
+                # 시퀀스 길이가 3보다 작은 경우 패딩 처리
+                padded_x = torch.zeros(batch_size, 3, feature_size, device=x.device)
+                padded_x[:, -seq_len:, :] = x
+                
+                # 4차원으로 변환 후 처리
+                x_reshaped = padded_x.unsqueeze(1)  # (batch_size, 1, 3, features)
+                
+                # 이하 동일한 처리
+                x_i = x_reshaped[:, :, 1:2, :]
+                h_i = self.cnn_layers(x_reshaped)
+                
+                r_i = torch.sigmoid(torch.matmul(h_i, self.W_r) + torch.matmul(x_i, self.V_r) + self.b_r)
+                u_i = torch.sigmoid(torch.matmul(h_i, self.W_u) + torch.matmul(x_i, self.V_u) + self.b_u)
+                
+                hh_i = torch.mul(h_i, u_i) + torch.mul(x_i, r_i)
+                
+                output = torch.matmul(hh_i, self.W_e) + self.b_e
+                output = output.view(batch_size, self.d_model)
+                
+                return output
+                
+        # 2차원 입력 처리 (batch, features) - 단일 시간 단계
+        elif input_dim == 2:
             batch_size = x.size(0)
             
             # 입력 크기 확인
@@ -146,43 +182,24 @@ class Gating(nn.Module):
                 # 특성 수가 너무 많은 경우 자르기
                 x = x[:, :self.m]
             
-            # 선형 투영으로 차원 변환
-            projected = self.input_projection(x)  # [batch_size, d_model]
+            # 단일 시간 단계를 3개로 복제하여 4차원으로 변환
+            x_repeated = x.unsqueeze(1).repeat(1, 3, 1)  # (batch_size, 3, features)
+            x_reshaped = x_repeated.unsqueeze(1)  # (batch_size, 1, 3, features)
             
-            # 게이팅 메커니즘
-            gate_val = self.sigmoid(self.gate(projected))
-            gated_output = projected * gate_val
+            # 이하 동일한 처리
+            x_i = x_reshaped[:, :, 1:2, :]
+            h_i = self.cnn_layers(x_reshaped)
             
-            # 피드포워드 네트워크
-            ff_output = F.relu(self.ff1(gated_output))
-            ff_output = self.dropout(ff_output)
-            ff_output = self.ff2(ff_output)
-            
-            # 잔차 연결 + 정규화
-            output = self.layer_norm(gated_output + ff_output)
-            
-            return output
-            
-        elif input_dim == 4:  # [batch_size, channels, seq_len, features] 형태 (원래 기대하던 형태)
-            # 원래 코드 사용하되 최종 출력에 레이어 정규화 추가
-            x_i = x[:, :, 1:2, :] #only applying the gating on the current row even with the stack of 3 rows cames as input (1,1,3,14)
-            h_i = self.cnn_layers(x) # shape becomes 1,1,1,14 as the nn.conv2d has output channel as 1 but the convolution is applied on whole past input (stack of three)
-            
-            # 나머지 처리는 동일하게 유지
             r_i = torch.sigmoid(torch.matmul(h_i, self.W_r) + torch.matmul(x_i, self.V_r) + self.b_r)
             u_i = torch.sigmoid(torch.matmul(h_i, self.W_u) + torch.matmul(x_i, self.V_u) + self.b_u)
-
-            # the output of the gating mechanism
+            
             hh_i = torch.mul(h_i, u_i) + torch.mul(x_i, r_i)
             
             output = torch.matmul(hh_i, self.W_e) + self.b_e
-            
-            # 출력 형태 재조정
-            output = output.view(-1, self.d_model)
-            # 레이어 정규화 적용
-            output = self.layer_norm(output)
+            output = output.view(batch_size, self.d_model)
             
             return output
+            
         else:
             # 지원하지 않는 차원
             raise ValueError(f"지원하지 않는 입력 차원: {input_dim}. 2차원, 3차원 또는 4차원 텐서가 필요합니다.")
@@ -265,31 +282,31 @@ class PositionalEncoder(nn.Module):
     def __init__(self, d_model):
         super().__init__()
         self.d_model = d_model
-        # RUL 예측에 더 적합한 위치 인코딩을 위한 추가 파라미터
-        self.scale = nn.Parameter(torch.ones(1))  # 스케일 파라미터
+        # 학습 가능한 스케일 파라미터 제거 (원본 코드에 없음)
+        # self.scale = nn.Parameter(torch.ones(1))
 
     def forward(self, x, t):
         # make embeddings relatively larger
         x = x * math.sqrt(self.d_model)
 
-        # 개선된 위치 인코딩 (RUL 예측에 최적화)
-        # t는 시간 정보이지만, 여기서는 배치 내 위치로 처리할 수 있음
+        # 원본 코드와 일치하도록 위치 인코딩 수정
+        # t는 시퀀스 내 위치(time step)를 나타냄
         batch_size = x.size(0)
         
         # 각 배치 항목에 대한 위치 인코딩 계산
         pe = torch.zeros(batch_size, self.d_model, device=x.device)
         
-        # 시간 정보를 가중치로 활용하여 위치 인코딩 생성
-        t_value = t if isinstance(t, (int, float)) else 0
+        # t를 시퀀스 내 위치로 사용
+        position = t if isinstance(t, (int, float)) else 0
         
         for i in range(0, self.d_model, 2):
             div_term = torch.exp(torch.arange(0, self.d_model, 2, device=x.device) * 
                                (-math.log(10000.0) / self.d_model))
             
-            # 각 배치에 대해 동일한 위치 인코딩 적용
-            pe[:, i] = torch.sin(t_value * div_term[i//2] * self.scale)
+            # 표준 위치 인코딩 공식 사용
+            pe[:, i] = torch.sin(position * div_term[i//2])
             if i + 1 < self.d_model:
-                pe[:, i + 1] = torch.cos(t_value * div_term[i//2] * self.scale)
+                pe[:, i + 1] = torch.cos(position * div_term[i//2])
                 
         # 위치 인코딩을 추가
         x = x + pe
