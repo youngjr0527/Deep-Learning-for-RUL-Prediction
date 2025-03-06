@@ -7,4 +7,6 @@ Transformer*.png
 # IDE
 .idea/
 
-
+*.txt
+*.pth
+.pdf
