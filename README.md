@@ -1,5 +1,5 @@
 
-# PyTorch-기반 CMAPSS 데이터셋 RUL 예측 프로젝트
+# Deep Learning 기반 CMAPSS 데이터셋 RUL 예측
 
 이 프로젝트는 NASA의 CMAPSS(Commercial Modular Aero-Propulsion System Simulation) 데이터셋을 사용하여 항공 엔진의 잔여 유효 수명(RUL, Remaining Useful Life)을 예측하는 딥러닝 모델을 구현한 것입니다. 현재 TCN(Temporal Convolutional Network)과 Transformer 모델이 구현되어 있으며, 추후 LSTM 모델도 추가될 예정입니다.
 
