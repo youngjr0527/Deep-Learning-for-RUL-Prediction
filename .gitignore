@@ -9,4 +9,7 @@ Transformer*.png
 
 *.txt
 *.pth
-.pdf
+*.pdf
+
+#datasets 폴더 
+datasets/
