@@ -12,4 +12,4 @@ Transformer*.png
 *.pdf
 
 #datasets 폴더 
-datasets/
+datasets/*
