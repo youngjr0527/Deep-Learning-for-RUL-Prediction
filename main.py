@@ -1,7 +1,3 @@
-import load
-import data
-from tcn import *
-from transformer import *  
 import torch
 import torchvision.transforms as transforms
 import random
@@ -10,7 +6,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import datetime
 import argparse  
-from tqdm import tqdm  # tqdm 추가
+from tqdm import tqdm 
+import pytz
+
+# 데이터 로딩 및 처리 모듈 임포트
+from data.data_loader import get_data
+from data.data_utils import NpToTensor, get_dataloader
+
+# 모델 임포트
+from models import LSTM, BiLSTM, Transformer, TemporalConvNet
+
+# 시각화 유틸리티 임포트
+from utils.visualization import visualize
 
 def set_seed(seed: int):
     """
@@ -45,6 +52,11 @@ def evaluate_model(model, val_loader, criterion, device='cpu', model_type='tcn',
                 inputs = inputs.transpose(1, 2)  # (batch_size, 5, 30)
                 outputs = model(inputs)
                 outputs = outputs[:, :, -1]
+            elif model_type == 'lstm' or model_type == 'bilstm':
+                # LSTM과 BiLSTM용 처리
+                # inputs shape: (batch_size, seq_len, features)
+                # LSTM/BiLSTM은 이미 batch_first=True로 설정되어 있으므로 변환 필요 없음
+                outputs = model(inputs)
             elif model_type == 'transformer':
                 # Transformer용 처리
                 batch_size = inputs.size(0)
@@ -295,6 +307,11 @@ def predict_and_evaluate(model, x_test, y_test, device, model_type, now):
                 # 마지막 시점의 예측만 사용
                 output = output[:, :, -1]  # (1, 1)
                 predictions.append(output.item())
+            elif model_type == 'lstm' or model_type == 'bilstm':
+                x = torch.tensor(x_test[i], dtype=torch.float, device=device).unsqueeze(0)  # (1, seq_len, num_features)
+                # 위에서 얻은 x 형태는 (1, seq_len, features)로 이미 LSTM/BiLSTM에 맞는 형태임
+                output = model(x)  # (1, 1)
+                predictions.append(output.item())
             elif model_type == 'transformer':
                 x = torch.tensor(x_test[i], dtype=torch.float, device=device)  # (seq_len, num_features)
                 seq_len = x.size(0)
@@ -379,8 +396,8 @@ def predict_and_evaluate(model, x_test, y_test, device, model_type, now):
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='RUL Prediction with TCN or Transformer')
-    parser.add_argument('--model', type=str, default='tcn', choices=['tcn', 'transformer'],
-                      help='Model type: tcn or transformer (default: tcn)')
+    parser.add_argument('--model', type=str, default='tcn', choices=['tcn', 'transformer', 'lstm', 'bilstm'],
+                      help='Model type: tcn, transformer, lstm, or bilstm (default: tcn)')
     parser.add_argument('--dataset', type=str, default='FD001', help='Dataset name (default: FD001)')
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs (default: 100)')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size (default: 32)')
@@ -401,8 +418,9 @@ def main():
     
     args = parser.parse_args()
     
-    # 현재 날짜와 시간을 now 변수로 생성
-    now = datetime.datetime.now().strftime("%m%d%H%M")
+    # 현재 날짜와 시간을 now 변수로 생성 (한국 시간 KST 기준)
+    kst = pytz.timezone('Asia/Seoul')
+    now = datetime.datetime.now(kst).strftime("%m%d%H%M")
 
     # Set random seed for reproducibility
     set_seed(args.seed)
@@ -420,16 +438,16 @@ def main():
     threshold = 125
 
     # Load data
-    x_train, y_train, x_val, y_val, x_test, y_test = load.get_data(dataset, sensors, 
+    x_train, y_train, x_val, y_val, x_test, y_test = get_data(dataset, sensors, 
     sequence_length, alpha, threshold)
 
     # Create data loaders
     batch_size = args.batch_size
     n_epochs = args.epochs
     n_workers = 8  # 병렬 처리 워커 수 증가
-    tf = transforms.Compose([data.NpToTensor()])
-    train_loader = data.get_dataloader(x_train, y_train, tf, None, True, batch_size, n_workers)
-    val_loader = data.get_dataloader(x_val, y_val, tf, None, True, batch_size, n_workers)
+    tf = transforms.Compose([NpToTensor()])
+    train_loader = get_dataloader(x_train, y_train, tf, None, True, batch_size, n_workers)
+    val_loader = get_dataloader(x_val, y_val, tf, None, True, batch_size, n_workers)
 
     # Model initialization based on user selection
     dropout = args.dropout
@@ -474,6 +492,42 @@ def main():
                 nn.init.xavier_uniform_(p)
         
         model_type = 'transformer'
+    
+    elif args.model == 'lstm':
+        # LSTM 모델 정의
+        hidden_size = 64  # 히든 레이어 크기
+        num_layers = 2    # LSTM 레이어 수
+        
+        print(f"LSTM 설정: input_size={m}, hidden_size={hidden_size}, num_layers={num_layers}, seq_len={sequence_length}")
+        
+        model = LSTM(
+            input_size=m,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            seq_length=sequence_length
+        ).to(device)
+        
+        # Initialize weights
+        for p in model.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+        
+        model_type = 'lstm'
+    
+    elif args.model == 'bilstm':
+        # BiLSTM 모델 정의
+        print(f"BiLSTM 설정: input_size={m}, seq_len={sequence_length}")
+        
+        model = BiLSTM(
+            input_size=m
+        ).to(device)
+        
+        # Initialize weights
+        for p in model.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+        
+        model_type = 'bilstm'
     
     # Loss function and optimizer
     criterion = torch.nn.MSELoss()

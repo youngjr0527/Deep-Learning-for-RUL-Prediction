@@ -18,7 +18,8 @@ m = 14  # number of features
 class Transformer(nn.Module):
     def __init__(self, m, d_model, N, heads, dropout):
         super().__init__()
-        self.gating = Gating(d_model, m)
+        # GCU 임베딩 레이어 사용
+        self.embedding = GCU(m, d_model)
         self.encoder = Encoder(d_model, N, heads, m, dropout)
         self.out = nn.Linear(d_model, 1)
         self.m = m  # 특성 수 저장
@@ -28,8 +29,8 @@ class Transformer(nn.Module):
         # 입력 크기 및 타입 디버깅 (주석 처리)
         # print(f"Transformer 입력 크기: {src.shape}, 타입: {src.dtype}")
         
-        # Gating 메커니즘을 통한 특성 변환
-        e_i = self.gating(src)  # e_i 크기: [batch_size, d_model]
+        # GCU 레이어를 통한 특성 변환
+        e_i = self.embedding(src)  # e_i 크기: [batch_size, d_model]
         
         # 인코더 통과
         e_outputs = self.encoder(e_i, t)  # e_outputs 크기: [batch_size, d_model]
@@ -41,168 +42,87 @@ class Transformer(nn.Module):
         return output.squeeze(-1)  # 마지막 차원(크기 1)을 제거
 
 
-class Gating(nn.Module):
-    def __init__(self, d_model, m): # 128,14
+# Gated Convolutional Unit (GCU)
+class GCU(nn.Module):
+    def __init__(self, m, d_model):
         super().__init__()
         self.m = m
         self.d_model = d_model
-
-        # 선형 변환 레이어 추가 - 입력 특성을 더 효과적으로 처리
-        self.input_projection = nn.Linear(m, d_model)
         
-        # 게이팅 메커니즘 개선
-        self.gate = nn.Linear(d_model, d_model)
-        self.sigmoid = nn.Sigmoid()
+        # 1D 컨볼루션 레이어 (특성 추출)
+        self.feature_conv = nn.Conv1d(in_channels=1, out_channels=d_model, kernel_size=3, padding=1)
         
-        # 피드포워드 네트워크로 변환
-        self.ff1 = nn.Linear(d_model, d_model * 2)
-        self.ff2 = nn.Linear(d_model * 2, d_model)
+        # 게이팅을 위한 컨볼루션 레이어
+        self.gate_conv = nn.Conv1d(in_channels=1, out_channels=d_model, kernel_size=3, padding=1)
+        
         self.dropout = nn.Dropout(0.1)
         self.layer_norm = nn.LayerNorm(d_model)
-
-        # the reset gate r_i
-        self.W_r = nn.Parameter(torch.Tensor(m, m))
-        self.V_r = nn.Parameter(torch.Tensor(m, m))
-        self.b_r = nn.Parameter(torch.Tensor(m))
-
-        # the update gate u_i
-        self.W_u = nn.Parameter(torch.Tensor(m, m))
-        self.V_u = nn.Parameter(torch.Tensor(m, m))
-        self.b_u = nn.Parameter(torch.Tensor(m))
-
-        # the output
-        self.W_e = nn.Parameter(torch.Tensor(m, d_model))
-        self.b_e = nn.Parameter(torch.Tensor(d_model))
-
-        self.init_weights()
-
-        self.cnn_layers = nn.Sequential(
-            nn.Conv2d(1, 1, kernel_size=(3, 1), stride=1), 
-        )
         
-
+        # 가중치 초기화
+        self.init_weights()
+        
     def init_weights(self):
-        stdv = 1.0 / math.sqrt(self.m)
-        for weight in self.parameters():
-            weight.data.uniform_(-stdv, stdv)
-        # 추가된 레이어 초기화
-        nn.init.xavier_uniform_(self.input_projection.weight)
-        nn.init.xavier_uniform_(self.gate.weight)
-        nn.init.xavier_uniform_(self.ff1.weight)
-        nn.init.xavier_uniform_(self.ff2.weight)
-
+        nn.init.xavier_uniform_(self.feature_conv.weight)
+        nn.init.xavier_uniform_(self.gate_conv.weight)
+        
     def forward(self, x):
         # 입력 텐서의 차원 확인 및 적절한 처리
         input_dim = len(x.shape)
         
-        # 원본 코드와 일치하도록 4차원 입력 처리 (batch, channel, seq_len, features)
-        if input_dim == 4:  # [batch_size, channels, seq_len, features] 형태
-            # 원본 코드 사용
-            x_i = x[:, :, 1:2, :]  # 중간 행만 사용 (t 시점)
-            h_i = self.cnn_layers(x)  # 3개 행에 대해 컨볼루션 적용 (t-1, t, t+1)
+        # 4차원 입력 처리 (batch, channel, seq_len, features)
+        if input_dim == 4:
+            batch_size = x.size(0)
+            # 중간 시점(t)의 특성만 사용
+            x_i = x[:, :, 1, :]  # [batch_size, channels, features]
+            # 차원 재조정
+            x_i = x_i.view(batch_size, -1)  # [batch_size, channels*features]
             
-            # 게이팅 메커니즘 적용
-            r_i = torch.sigmoid(torch.matmul(h_i, self.W_r) + torch.matmul(x_i, self.V_r) + self.b_r)
-            u_i = torch.sigmoid(torch.matmul(h_i, self.W_u) + torch.matmul(x_i, self.V_u) + self.b_u)
-
-            # the output of the gating mechanism
-            hh_i = torch.mul(h_i, u_i) + torch.mul(x_i, r_i)
+            # 특성 수 조정 (필요한 경우)
+            if x_i.size(1) != self.m:
+                # 선형 보간으로 크기 조정
+                x_i = F.interpolate(x_i.unsqueeze(1), size=self.m, mode='linear').squeeze(1)
             
-            output = torch.matmul(hh_i, self.W_e) + self.b_e
-            
-            # 출력 형태 재조정
-            output = output.view(-1, self.d_model)
-            
-            return output
-            
-        # 3차원 입력 처리 (batch, seq_len, features) - 이 경우 3개의 연속된 시간 단계로 변환
+        # 3차원 입력 처리 (batch, seq_len, features)
         elif input_dim == 3:
             batch_size = x.size(0)
-            seq_len = x.size(1)
-            feature_size = x.size(2)
+            # 마지막 시점의 특성 사용
+            x_i = x[:, -1, :]  # [batch_size, features]
             
-            # 시퀀스 길이가 충분한 경우에만 처리
-            if seq_len >= 3:
-                # 마지막 3개의 시간 단계 선택 (또는 필요에 따라 다른 위치 선택)
-                last_steps = x[:, -3:, :]  # (batch_size, 3, features)
+            # 특성 수 조정 (필요한 경우)
+            if x_i.size(1) != self.m:
+                # 선형 보간으로 크기 조정
+                x_i = F.interpolate(x_i.unsqueeze(1), size=self.m, mode='linear').squeeze(1)
                 
-                # 4차원으로 변환 (batch_size, 1, 3, features)
-                x_reshaped = last_steps.unsqueeze(1)
-                
-                # 4차원 처리 로직 재사용
-                x_i = x_reshaped[:, :, 1:2, :]  # 중간 행만 사용
-                h_i = self.cnn_layers(x_reshaped)  # 3개 행에 대해 컨볼루션 적용
-                
-                # 게이팅 메커니즘 적용
-                r_i = torch.sigmoid(torch.matmul(h_i, self.W_r) + torch.matmul(x_i, self.V_r) + self.b_r)
-                u_i = torch.sigmoid(torch.matmul(h_i, self.W_u) + torch.matmul(x_i, self.V_u) + self.b_u)
-                
-                # the output of the gating mechanism
-                hh_i = torch.mul(h_i, u_i) + torch.mul(x_i, r_i)
-                
-                output = torch.matmul(hh_i, self.W_e) + self.b_e
-                
-                # 출력 형태 재조정
-                output = output.view(batch_size, self.d_model)
-                
-                return output
-            else:
-                # 시퀀스 길이가 3보다 작은 경우 패딩 처리
-                padded_x = torch.zeros(batch_size, 3, feature_size, device=x.device)
-                padded_x[:, -seq_len:, :] = x
-                
-                # 4차원으로 변환 후 처리
-                x_reshaped = padded_x.unsqueeze(1)  # (batch_size, 1, 3, features)
-                
-                # 이하 동일한 처리
-                x_i = x_reshaped[:, :, 1:2, :]
-                h_i = self.cnn_layers(x_reshaped)
-                
-                r_i = torch.sigmoid(torch.matmul(h_i, self.W_r) + torch.matmul(x_i, self.V_r) + self.b_r)
-                u_i = torch.sigmoid(torch.matmul(h_i, self.W_u) + torch.matmul(x_i, self.V_u) + self.b_u)
-                
-                hh_i = torch.mul(h_i, u_i) + torch.mul(x_i, r_i)
-                
-                output = torch.matmul(hh_i, self.W_e) + self.b_e
-                output = output.view(batch_size, self.d_model)
-                
-                return output
-                
-        # 2차원 입력 처리 (batch, features) - 단일 시간 단계
+        # 2차원 입력 처리 (batch, features)
         elif input_dim == 2:
-            batch_size = x.size(0)
+            x_i = x
             
-            # 입력 크기 확인
-            if x.size(1) < self.m:
-                # 특성 수가 부족한 경우 패딩
-                padded_x = torch.zeros(batch_size, self.m, device=x.device)
-                padded_x[:, :x.size(1)] = x
-                x = padded_x
-            elif x.size(1) > self.m:
-                # 특성 수가 너무 많은 경우 자르기
-                x = x[:, :self.m]
-            
-            # 단일 시간 단계를 3개로 복제하여 4차원으로 변환
-            x_repeated = x.unsqueeze(1).repeat(1, 3, 1)  # (batch_size, 3, features)
-            x_reshaped = x_repeated.unsqueeze(1)  # (batch_size, 1, 3, features)
-            
-            # 이하 동일한 처리
-            x_i = x_reshaped[:, :, 1:2, :]
-            h_i = self.cnn_layers(x_reshaped)
-            
-            r_i = torch.sigmoid(torch.matmul(h_i, self.W_r) + torch.matmul(x_i, self.V_r) + self.b_r)
-            u_i = torch.sigmoid(torch.matmul(h_i, self.W_u) + torch.matmul(x_i, self.V_u) + self.b_u)
-            
-            hh_i = torch.mul(h_i, u_i) + torch.mul(x_i, r_i)
-            
-            output = torch.matmul(hh_i, self.W_e) + self.b_e
-            output = output.view(batch_size, self.d_model)
-            
-            return output
-            
+            # 특성 수 조정 (필요한 경우)
+            if x_i.size(1) != self.m:
+                # 선형 보간으로 크기 조정
+                x_i = F.interpolate(x_i.unsqueeze(1), size=self.m, mode='linear').squeeze(1)
         else:
             # 지원하지 않는 차원
             raise ValueError(f"지원하지 않는 입력 차원: {input_dim}. 2차원, 3차원 또는 4차원 텐서가 필요합니다.")
+        
+        # 1D 컨볼루션을 위한 차원 변환
+        x_conv = x_i.unsqueeze(1)  # [batch_size, 1, features]
+        
+        # 특성 추출 및 게이팅 적용
+        features = self.feature_conv(x_conv)  # [batch_size, d_model, features]
+        gates = torch.sigmoid(self.gate_conv(x_conv))  # [batch_size, d_model, features]
+        
+        # 게이트와 특성 결합 (요소별 곱셈)
+        gated_features = features * gates  # [batch_size, d_model, features]
+        
+        # 전역 평균 풀링으로 시퀀스 차원 제거
+        output = F.adaptive_avg_pool1d(gated_features, 1).squeeze(-1)  # [batch_size, d_model]
+        
+        # 드롭아웃 및 레이어 정규화 적용
+        output = self.dropout(output)
+        output = self.layer_norm(output)
+        
+        return output
 
 
 class Encoder(nn.Module):
@@ -421,4 +341,4 @@ class FeedForward(nn.Module):
     def forward(self, x):
         x = self.dropout(F.relu(self.linear_1(x)))
         x = self.linear_2(x)
-        return x
+        return x 

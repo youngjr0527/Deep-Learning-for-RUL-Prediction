@@ -1,9 +1,12 @@
 import torch
 torch.manual_seed(1)
-from model import *
-from loading_data import *
-from testing import *
-from visualize import *
+# 모델 임포트
+from models import LSTM, BiLSTM, Transformer, TemporalConvNet
+# 데이터 로딩 임포트
+from data.data_loader import get_data
+from data.data_utils import NpToTensor, get_dataloader
+# 유틸리티 함수 임포트
+from utils.visualization import visualize
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 import argparse

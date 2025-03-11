@@ -59,4 +59,4 @@ class TemporalConvNet(nn.Module):
         self.network = nn.Sequential(*layers)
 
     def forward(self, x):
-        return self.network(x)
+        return self.network(x) 
